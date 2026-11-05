@@ -1,0 +1,808 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:html/parser.dart' as html_parser;
+
+void main() {
+  runApp(const QuizApp());
+}
+
+class QuizApp extends StatelessWidget {
+  const QuizApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Quiz Application',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+        ),
+        useMaterial3: true,
+      ),
+      home: const HomeScreen(),
+    );
+  }
+}
+
+// QUESTION MODEL
+
+class QuizQuestion {
+  final String question;
+  final List<String> options;
+  final String answer;
+  final String category;
+
+  QuizQuestion({
+    required this.question,
+    required this.options,
+    required this.answer,
+    required this.category,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'question': question,
+    'options': options,
+    'answer': answer,
+    'category': category,
+  };
+
+  factory QuizQuestion.fromJson(Map<String, dynamic> json) {
+    return QuizQuestion(
+      question: json['question'],
+      options: List<String>.from(json['options']),
+      answer: json['answer'],
+      category: json['category'],
+    );
+  }
+}
+
+// LOCAL STORAGE
+
+class QuizStorage {
+  static Future<void> saveBestScore(
+      String category, int score) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    int oldScore = prefs.getInt('best_$category') ?? 0;
+
+    if (score > oldScore) {
+      await prefs.setInt('best_$category', score);
+    }
+  }
+
+  static Future<int> getBestScore(String category) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('best_$category') ?? 0;
+  }
+
+  static Future<void> saveCustomQuestion(
+      QuizQuestion question) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    List<String> questions =
+        prefs.getStringList('custom_questions') ?? [];
+
+    questions.add(jsonEncode(question.toJson()));
+
+    await prefs.setStringList('custom_questions', questions);
+  }
+
+  static Future<List<QuizQuestion>> getCustomQuestions() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    List<String> data =
+        prefs.getStringList('custom_questions') ?? [];
+
+    return data.map((item) {
+      return QuizQuestion.fromJson(jsonDecode(item));
+    }).toList();
+  }
+}
+
+// QUIZ API
+
+class QuizApi {
+  static Future<List<QuizQuestion>> fetchQuestions(
+      int categoryId, String categoryName) async {
+
+    final url = Uri.parse(
+      'https://opentdb.com/api.php'
+      '?amount=10&category=$categoryId&type=multiple',
+    );
+
+    final response = await http.get(url);
+
+    if (response.statusCode != 200) {
+      throw Exception('Unable to load questions');
+    }
+
+    final data = jsonDecode(response.body);
+
+    if (data['response_code'] != 0) {
+      return [];
+    }
+
+    return (data['results'] as List).map((item) {
+      String decodeText(String value) {
+        return html_parser.parse(value).body?.text ?? value;
+      }
+
+      String question = decodeText(item['question']);
+      String answer = decodeText(item['correct_answer']);
+
+      List<String> options = [
+        answer,
+        ...(item['incorrect_answers'] as List)
+            .map((e) => decodeText(e.toString())),
+      ];
+
+      options.shuffle();
+
+      return QuizQuestion(
+        question: question,
+        options: options,
+        answer: answer,
+        category: categoryName,
+      );
+    }).toList();
+  }
+}
+
+// HOME SCREEN
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+
+  final Map<String, int> categories = {
+    'Science': 17,
+    'Computer': 18,
+    'Mathematics': 19,
+    'General Knowledge': 9,
+    'History': 23,
+  };
+
+  Future<void> startQuiz(String category, int id) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(),
+      ),
+    );
+
+    List<QuizQuestion> questions = [];
+
+    try {
+      questions = await QuizApi.fetchQuestions(id, category);
+    } catch (_) {
+      // Use locally saved questions if API is unavailable.
+    }
+
+    final custom = await QuizStorage.getCustomQuestions();
+
+    if (questions.isEmpty) {
+      questions = custom
+          .where((q) => q.category == category)
+          .toList();
+    }
+
+    if (!mounted) return;
+
+    Navigator.pop(context);
+
+    if (questions.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No questions available.'),
+        ),
+      );
+      return;
+    }
+
+    questions.shuffle();
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => QuestionScreen(
+          category: category,
+          questions: questions,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Quiz Application',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+      ),
+
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+
+            const Text(
+              'Welcome to Quiz!',
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            const Text(
+              'Choose your favourite category.',
+              style: TextStyle(fontSize: 16),
+            ),
+
+            const SizedBox(height: 20),
+
+            Expanded(
+              child: ListView(
+                children: categories.entries.map((entry) {
+                  return Card(
+                    child: ListTile(
+                      leading: const CircleAvatar(
+                        child: Icon(Icons.quiz),
+                      ),
+
+                      title: Text(
+                        entry.key,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+
+                      subtitle: FutureBuilder<int>(
+                        future: QuizStorage.getBestScore(entry.key),
+                        builder: (context, snapshot) {
+                          return Text(
+                            'Best Score: ${snapshot.data ?? 0}',
+                          );
+                        },
+                      ),
+
+                      trailing: const Icon(
+                        Icons.arrow_forward_ios,
+                      ),
+
+                      onTap: () => startQuiz(
+                        entry.key,
+                        entry.value,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.add),
+                label: const Text('Add Custom Question'),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const AddQuestionScreen(),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// QUESTION SCREEN
+
+class QuestionScreen extends StatefulWidget {
+  final String category;
+  final List<QuizQuestion> questions;
+
+  const QuestionScreen({
+    super.key,
+    required this.category,
+    required this.questions,
+  });
+
+  @override
+  State<QuestionScreen> createState() =>
+      _QuestionScreenState();
+}
+
+class _QuestionScreenState extends State<QuestionScreen> {
+
+  int currentIndex = 0;
+  int score = 0;
+  String? selectedAnswer;
+
+  void nextQuestion() {
+    if (selectedAnswer == null) return;
+
+    if (selectedAnswer ==
+        widget.questions[currentIndex].answer) {
+      score++;
+    }
+
+    if (currentIndex < widget.questions.length - 1) {
+      setState(() {
+        currentIndex++;
+        selectedAnswer = null;
+      });
+    } else {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            category: widget.category,
+            score: score,
+            total: widget.questions.length,
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+
+    final question = widget.questions[currentIndex];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.category),
+        centerTitle: true,
+      ),
+
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+
+            Text(
+              'Question ${currentIndex + 1} '
+              'of ${widget.questions.length}',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            LinearProgressIndicator(
+              value: (currentIndex + 1) /
+                  widget.questions.length,
+            ),
+
+            const SizedBox(height: 30),
+
+            Text(
+              question.question,
+              style: const TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 25),
+
+            ...question.options.map((option) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.all(16),
+                    backgroundColor:
+                        selectedAnswer == option
+                            ? Colors.deepPurple.shade100
+                            : Colors.white,
+                  ),
+
+                  onPressed: () {
+                    setState(() {
+                      selectedAnswer = option;
+                    });
+                  },
+
+                  child: Text(
+                    option,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      color: Colors.black,
+                    ),
+                  ),
+                ),
+              );
+            }),
+
+            const Spacer(),
+
+            ElevatedButton(
+              onPressed: selectedAnswer == null
+                  ? null
+                  : nextQuestion,
+
+              child: Text(
+                currentIndex == widget.questions.length - 1
+                    ? 'Finish Quiz'
+                    : 'Next Question',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// RESULT SCREEN
+
+class ResultScreen extends StatefulWidget {
+  final String category;
+  final int score;
+  final int total;
+
+  const ResultScreen({
+    super.key,
+    required this.category,
+    required this.score,
+    required this.total,
+  });
+
+  @override
+  State<ResultScreen> createState() =>
+      _ResultScreenState();
+}
+
+class _ResultScreenState extends State<ResultScreen> {
+
+  int bestScore = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    saveResult();
+  }
+
+  Future<void> saveResult() async {
+    await QuizStorage.saveBestScore(
+      widget.category,
+      widget.score,
+    );
+
+    int best = await QuizStorage.getBestScore(
+      widget.category,
+    );
+
+    if (mounted) {
+      setState(() {
+        bestScore = best;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+
+    double percentage =
+        (widget.score / widget.total) * 100;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Quiz Results'),
+        automaticallyImplyLeading: false,
+        centerTitle: true,
+      ),
+
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(25),
+
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+
+              const Icon(
+                Icons.emoji_events,
+                size: 100,
+                color: Colors.orange,
+              ),
+
+              const SizedBox(height: 20),
+
+              const Text(
+                'Congratulations!',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 25),
+
+              Text(
+                'Your Score: ${widget.score}/${widget.total}',
+                style: const TextStyle(fontSize: 23),
+              ),
+
+              const SizedBox(height: 15),
+
+              Text(
+                'Percentage: ${percentage.toStringAsFixed(1)}%',
+                style: const TextStyle(fontSize: 20),
+              ),
+
+              const SizedBox(height: 15),
+
+              Text(
+                'Best Score: $bestScore',
+                style: const TextStyle(
+                  fontSize: 20,
+                  color: Colors.deepPurple,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 35),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pushAndRemoveUntil(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const HomeScreen(),
+                      ),
+                      (route) => false,
+                    );
+                  },
+                  child: const Text('Back to Home'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ADD CUSTOM QUESTION SCREEN
+
+class AddQuestionScreen extends StatefulWidget {
+  const AddQuestionScreen({super.key});
+
+  @override
+  State<AddQuestionScreen> createState() =>
+      _AddQuestionScreenState();
+}
+
+class _AddQuestionScreenState
+    extends State<AddQuestionScreen> {
+
+  final questionController = TextEditingController();
+  final option1Controller = TextEditingController();
+  final option2Controller = TextEditingController();
+  final option3Controller = TextEditingController();
+  final option4Controller = TextEditingController();
+
+  String category = 'Science';
+  String answer = 'Option 1';
+
+  final List<String> categories = [
+    'Science',
+    'Computer',
+    'Mathematics',
+    'General Knowledge',
+    'History',
+  ];
+
+  Future<void> saveQuestion() async {
+
+    List<String> options = [
+      option1Controller.text.trim(),
+      option2Controller.text.trim(),
+      option3Controller.text.trim(),
+      option4Controller.text.trim(),
+    ];
+
+    if (questionController.text.trim().isEmpty ||
+        options.any((e) => e.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please fill all fields.'),
+        ),
+      );
+      return;
+    }
+
+    if (options.toSet().length != 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter four different options.'),
+        ),
+      );
+      return;
+    }
+
+    int answerIndex = int.parse(
+      answer.replaceAll('Option ', ''),
+    ) - 1;
+
+    final question = QuizQuestion(
+      question: questionController.text.trim(),
+      options: options,
+      answer: options[answerIndex],
+      category: category,
+    );
+
+    await QuizStorage.saveCustomQuestion(question);
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Question saved successfully!'),
+      ),
+    );
+
+    Navigator.pop(context);
+  }
+
+  Widget buildTextField(
+      String label, TextEditingController controller) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 15),
+      child: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    questionController.dispose();
+    option1Controller.dispose();
+    option2Controller.dispose();
+    option3Controller.dispose();
+    option4Controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Add Custom Question'),
+        centerTitle: true,
+      ),
+
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+
+        child: Column(
+          children: [
+
+            DropdownButtonFormField<String>(
+              value: category,
+              decoration: const InputDecoration(
+                labelText: 'Select Category',
+                border: OutlineInputBorder(),
+              ),
+              items: categories.map((item) {
+                return DropdownMenuItem(
+                  value: item,
+                  child: Text(item),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() {
+                    category = value;
+                  });
+                }
+              },
+            ),
+
+            const SizedBox(height: 20),
+
+            buildTextField(
+              'Enter Question',
+              questionController,
+            ),
+
+            buildTextField(
+              'Option 1',
+              option1Controller,
+            ),
+
+            buildTextField(
+              'Option 2',
+              option2Controller,
+            ),
+
+            buildTextField(
+              'Option 3',
+              option3Controller,
+            ),
+
+            buildTextField(
+              'Option 4',
+              option4Controller,
+            ),
+
+            DropdownButtonFormField<String>(
+              value: answer,
+              decoration: const InputDecoration(
+                labelText: 'Correct Answer',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                'Option 1',
+                'Option 2',
+                'Option 3',
+                'Option 4',
+              ].map((item) {
+                return DropdownMenuItem(
+                  value: item,
+                  child: Text(item),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() {
+                    answer = value;
+                  });
+                }
+              },
+            ),
+
+            const SizedBox(height: 25),
+
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.save),
+                label: const Text('Save Question'),
+                onPressed: saveQuestion,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
